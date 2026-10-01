@@ -24,9 +24,8 @@
  *   5. Frozen output invariant — every mapper in the module produces frozen
  *      output even when called concurrently (simulated with Promise.all).
  *
- *   6. Route import correctness — GET /api/admin/indexer/events must not
- *      throw ReferenceError because mapQueryToDTO / mapDTOToServiceParams are
- *      now imported in adminIndexer.js.
+ *   6. Route module loading — the admin indexer route must load without a
+ *      duplicate binding between local adapters and DTO imports.
  *
  *   7. bulkIndexerEvents concurrent isolation — multiple items in a bulk batch
  *      share the same Knex builder chain without interfering with each other's
@@ -319,20 +318,30 @@ describe('Frozen output invariant across all mappers (issue #1350)', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 6. Route import correctness — ReferenceError regression
+// 6. Route module loading — duplicate mapper binding regression
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('adminIndexer route — mapQueryToDTO / mapDTOToServiceParams import (issue #1350)', () => {
+describe('adminIndexer route — module loading (issue #1350)', () => {
   test('requiring adminIndexer.js does not throw ReferenceError', () => {
-    // Before the fix, adminIndexer.js called mapQueryToDTO and mapDTOToServiceParams
-    // without importing them, causing a ReferenceError on every GET /events request.
+    // The route has local adapters for its flat service-parameter contract;
+    // importing same-named nested DTO adapters caused a parse-time collision.
     expect(() => {
       // Use a fresh module instance to avoid cache interference with other test suites
       jest.isolateModules(() => {
         // Mock heavy transitive deps so the require does not need a live DB
         jest.mock('../src/db/knex', () => ({}));
+        jest.mock('../src/services/indexerService', () => ({
+          listIndexerEvents: jest.fn(),
+          bulkIndexerEvents: jest.fn(),
+          validateBulkPayload: jest.fn(),
+        }));
+        jest.mock('../src/schemas/indexerQuery', () => ({
+          validateIndexerQuery: jest.fn(),
+        }));
         jest.mock('../src/config', () => ({ get: () => ({ ESCROW_INDEXER_ENABLED: 'false' }) }));
-        jest.mock('../src/middleware/stacks', () => ({ adminStack: [] }));
+        jest.mock('../src/middleware/stacks', () => ({
+          adminStack: [(_req, _res, next) => next()],
+        }));
         jest.mock('../src/middleware/rateLimit', () => ({ indexerLimiter: (_r, _s, n) => n() }));
         jest.mock('../src/middleware/indexerMetrics', () => ({
           instrumentIndexer: (h) => h,
@@ -349,8 +358,18 @@ describe('adminIndexer route — mapQueryToDTO / mapDTOToServiceParams import (i
   test('adminIndexer module exports a router (not undefined)', () => {
     jest.isolateModules(() => {
       jest.mock('../src/db/knex', () => ({}));
+      jest.mock('../src/services/indexerService', () => ({
+        listIndexerEvents: jest.fn(),
+        bulkIndexerEvents: jest.fn(),
+        validateBulkPayload: jest.fn(),
+      }));
+      jest.mock('../src/schemas/indexerQuery', () => ({
+        validateIndexerQuery: jest.fn(),
+      }));
       jest.mock('../src/config', () => ({ get: () => ({ ESCROW_INDEXER_ENABLED: 'false' }) }));
-      jest.mock('../src/middleware/stacks', () => ({ adminStack: [] }));
+      jest.mock('../src/middleware/stacks', () => ({
+        adminStack: [(_req, _res, next) => next()],
+      }));
       jest.mock('../src/middleware/rateLimit', () => ({ indexerLimiter: (_r, _s, n) => n() }));
       jest.mock('../src/middleware/indexerMetrics', () => ({
         instrumentIndexer: (h) => h,

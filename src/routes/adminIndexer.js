@@ -25,7 +25,6 @@ const responseHelper = require('../utils/responseHelper');
 const logger = require('../logger');
 const { validateIndexerQuery } = require('../schemas/indexerQuery');
 const { instrumentIndexer } = require('../middleware/indexerMetrics');
-const { mapQueryToDTO, mapDTOToServiceParams } = require('../dto/indexer');
 
 /**
  * Map validated query params to the internal DTO shape used by the service.
@@ -73,7 +72,7 @@ function mapDTOToServiceParams(dto) {
 let validateEscrowIndexerBoundaries;
 try {
   ({ validateEscrowIndexerBoundaries } = require('../schemas/escrowIndexerBoundaries'));
-} catch (err) {
+} catch (_err) {
   validateEscrowIndexerBoundaries = () => ({ ok: true });
 }
 

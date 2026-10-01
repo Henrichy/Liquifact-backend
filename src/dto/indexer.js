@@ -126,18 +126,34 @@ function mapDTOToServiceParams(dto) {
     return { filters: {}, sorting: {}, pagination: {} };
   }
   const filters = {};
-  if (dto.filters.invoiceId !== undefined) filters.invoiceId = dto.filters.invoiceId;
-  if (dto.filters.eventType !== undefined) filters.eventType = dto.filters.eventType;
-  if (dto.filters.contractId !== undefined) filters.contractId = dto.filters.contractId;
+  if (dto.filters.invoiceId !== undefined) {
+    filters.invoiceId = dto.filters.invoiceId;
+  }
+  if (dto.filters.eventType !== undefined) {
+    filters.eventType = dto.filters.eventType;
+  }
+  if (dto.filters.contractId !== undefined) {
+    filters.contractId = dto.filters.contractId;
+  }
 
   const sorting = {};
-  if (dto.sorting.sortBy !== undefined) sorting.sortBy = dto.sorting.sortBy;
-  if (dto.sorting.order !== undefined) sorting.order = dto.sorting.order;
+  if (dto.sorting.sortBy !== undefined) {
+    sorting.sortBy = dto.sorting.sortBy;
+  }
+  if (dto.sorting.order !== undefined) {
+    sorting.order = dto.sorting.order;
+  }
 
   const pagination = {};
-  if (dto.pagination.cursor !== undefined) pagination.cursor = dto.pagination.cursor;
-  if (dto.pagination.page !== undefined) pagination.page = dto.pagination.page;
-  if (dto.pagination.limit !== undefined) pagination.limit = dto.pagination.limit;
+  if (dto.pagination.cursor !== undefined) {
+    pagination.cursor = dto.pagination.cursor;
+  }
+  if (dto.pagination.page !== undefined) {
+    pagination.page = dto.pagination.page;
+  }
+  if (dto.pagination.limit !== undefined) {
+    pagination.limit = dto.pagination.limit;
+  }
 
   return { filters, sorting, pagination };
 }
@@ -249,8 +265,12 @@ function mapMetaToDTO(rawMeta) {
     hasMore: Boolean(rawMeta.hasMore),
     nextCursor: rawMeta.nextCursor != null ? String(rawMeta.nextCursor) : null,
   };
-  if (rawMeta.page !== undefined) dto.page = Number(rawMeta.page);
-  if (rawMeta.totalPages !== undefined) dto.totalPages = Number(rawMeta.totalPages);
+  if (rawMeta.page !== undefined) {
+    dto.page = Number(rawMeta.page);
+  }
+  if (rawMeta.totalPages !== undefined) {
+    dto.totalPages = Number(rawMeta.totalPages);
+  }
   return Object.freeze(dto);
 }
 
@@ -287,6 +307,103 @@ function mapServiceResultToResponseDTO(serviceResult) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
+ * Creates an isolated copy of a JSON-like event body. Circular references are
+ * rejected before a DTO can escape; they cannot be persisted as JSON and must
+ * not be silently truncated during recovery.
+ *
+ * @param {*} value
+ * @param {WeakSet<object>} [ancestors]
+ * @returns {*}
+ */
+function cloneEventBody(value, ancestors = new WeakSet()) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      throw new TypeError('eventBody contains a non-finite number');
+    }
+    return value;
+  }
+  if (typeof value !== 'object') {
+    throw new TypeError('eventBody contains a value that cannot be persisted as JSON');
+  }
+  if (value instanceof Date) {
+    if (!Number.isFinite(value.getTime())) {
+      throw new TypeError('eventBody contains an invalid Date');
+    }
+    // JSON persistence serializes Date instances as ISO strings; snapshot that
+    // value directly so a frozen DTO cannot still be changed with setTime().
+    return value.toISOString();
+  }
+  if (ancestors.has(value)) {
+    throw new TypeError('eventBody must not contain circular references');
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError('eventBody must contain only plain objects and arrays');
+  }
+
+  ancestors.add(value);
+  const copy = Array.isArray(value) ? [] : {};
+  for (const key of Object.keys(value)) {
+    Object.defineProperty(copy, key, {
+      value: cloneEventBody(value[key], ancestors),
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
+  ancestors.delete(value);
+  return copy;
+}
+
+/**
+ * Recursively freezes a copied event body so concurrent consumers cannot
+ * mutate the snapshot after DTO construction.
+ *
+ * @param {*} value
+ * @param {WeakSet<object>} [seen]
+ * @returns {*}
+ */
+function deepFreezeEventBody(value, seen = new WeakSet()) {
+  if (value === null || typeof value !== 'object' || seen.has(value)) {
+    return value;
+  }
+  seen.add(value);
+  for (const key of Object.keys(value)) {
+    deepFreezeEventBody(value[key], seen);
+  }
+  return Object.freeze(value);
+}
+
+/**
+ * Preserves valid UTC ISO-8601 strings and converts valid Date objects to the
+ * same canonical representation used by the persistence layer.
+ *
+ * @param {*} value
+ * @param {string} fieldName
+ * @returns {string}
+ */
+function normalizeIndexerTimestamp(value, fieldName) {
+  if (value instanceof Date) {
+    if (!Number.isFinite(value.getTime())) {
+      throw new TypeError(`mapRawToIngestDTO: ${fieldName} must be a valid ISO-8601 timestamp`);
+    }
+    return value.toISOString();
+  }
+  if (typeof value !== 'string' ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(value)) {
+    throw new TypeError(`mapRawToIngestDTO: ${fieldName} must be a valid ISO-8601 timestamp`);
+  }
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 19) !== value.slice(0, 19)) {
+    throw new TypeError(`mapRawToIngestDTO: ${fieldName} must be a valid ISO-8601 timestamp`);
+  }
+  return value;
+}
+
+/**
  * Typed representation of a raw escrow event as it enters the indexer job
  * boundary (i.e. what `normalizeEvent` + `persistEscrowEvent` consume).
  *
@@ -320,8 +437,8 @@ function mapServiceResultToResponseDTO(serviceResult) {
  *   current instant).  This means two concurrent calls for the same raw event
  *   without an explicit `observedAt` will share the same timestamp when
  *   supplied the same `capturedAt`, producing deterministic ordering.
- * - `eventBody` is a shallow copy of the source so that subsequent mutations
- *   to `raw` do not affect the already-frozen DTO.
+ * - `eventBody` is an isolated, recursively frozen snapshot so subsequent
+ *   mutations to `raw` or another consumer cannot affect this DTO.
  * - `invoiceId` must be a non-empty string; an empty invoiceId makes the DTO
  *   unusable for projection keying and is therefore rejected here rather than
  *   inside the persistence layer.
@@ -334,15 +451,41 @@ function mapServiceResultToResponseDTO(serviceResult) {
  *   this once before the loop so every event in the batch shares the same
  *   fallback timestamp.
  * @returns {IndexerIngestEventDTO}
- * @throws {TypeError} If `invoiceId` is falsy (empty string, null, undefined).
+ * @throws {TypeError} If `invoiceId` is not a non-empty string, an option or
+ *   timestamp is invalid, or `eventBody` cannot be safely persisted as JSON.
  */
-function mapRawToIngestDTO(raw, invoiceId) {
-  if (raw == null || typeof raw !== 'object') {
+function mapRawToIngestDTO(raw, invoiceId, opts = {}) {
+  // Validate keying information before reading or copying payload data. A bad
+  // key must fail atomically rather than yielding a partially usable DTO.
+  if (typeof invoiceId !== 'string' || invoiceId.length === 0) {
+    throw new TypeError('mapRawToIngestDTO: invoiceId must be a non-empty string');
+  }
+  if (opts == null || typeof opts !== 'object' || Array.isArray(opts)) {
+    throw new TypeError('mapRawToIngestDTO: opts must be an object');
+  }
+
+  if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) {
     raw = {};
   }
+
+  // Capture the fallback exactly once per call. Batch callers can pass one
+  // shared capturedAt value to make timestamps identical across retries.
+  const fallbackTimestamp = opts.capturedAt !== undefined
+    ? normalizeIndexerTimestamp(opts.capturedAt, 'capturedAt')
+    : new Date().toISOString();
+  const sourceEventBody = raw.eventBody !== undefined ? raw.eventBody : raw;
+  const eventBody = sourceEventBody != null && typeof sourceEventBody === 'object' &&
+    !Array.isArray(sourceEventBody)
+    ? deepFreezeEventBody(cloneEventBody(sourceEventBody))
+    : Object.freeze({});
+  const rawObservedAt = raw.observedAt;
+  const observedAt = rawObservedAt
+    ? normalizeIndexerTimestamp(rawObservedAt, 'raw.observedAt')
+    : fallbackTimestamp;
+
   return Object.freeze({
     eventId: String(raw.id || raw.eventId || ''),
-    invoiceId: resolvedInvoiceId,
+    invoiceId,
     eventType: String(raw.type || raw.eventType || 'contract_event'),
     ledgerSequence: Number(raw.ledger || raw.ledgerSequence || 0),
     pagingToken: String(raw.paging_token || raw.pagingToken || ''),
@@ -353,7 +496,7 @@ function mapRawToIngestDTO(raw, invoiceId) {
       ? String(raw.tx_hash || raw.txHash)
       : null,
     eventBody,
-    observedAt: raw.observedAt || fallbackTimestamp,
+    observedAt,
   });
 }
 
@@ -373,7 +516,12 @@ function mapIngestDTOToNormalized(dto) {
   if (dto == null || typeof dto !== 'object') {
     throw new TypeError('mapIngestDTOToNormalized: dto must be a non-null object');
   }
-  return {
+  const sourceEventBody = dto.eventBody;
+  const copiedEventBody = sourceEventBody == null ? sourceEventBody : cloneEventBody(sourceEventBody);
+  const eventBody = copiedEventBody != null && typeof copiedEventBody === 'object'
+    ? deepFreezeEventBody(copiedEventBody)
+    : copiedEventBody;
+  return Object.freeze({
     eventId: dto.eventId,
     invoiceId: dto.invoiceId,
     eventType: dto.eventType,
@@ -381,7 +529,7 @@ function mapIngestDTOToNormalized(dto) {
     pagingToken: dto.pagingToken,
     contractId: dto.contractId,
     txHash: dto.txHash,
-    eventBody: dto.eventBody,
+    eventBody,
     observedAt: dto.observedAt,
   });
 }

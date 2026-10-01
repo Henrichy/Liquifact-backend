@@ -525,6 +525,61 @@ describe('mapRawToIngestDTO()', () => {
     expect(dto.eventBody.type).toBe(originalType);
   });
 
+  test('deeply snapshots and freezes nested eventBody data', () => {
+    const details = { tags: ['initial'] };
+    const dto = mapRawToIngestDTO({ eventBody: { details } }, 'inv_nested');
+
+    details.tags.push('mutated');
+    expect(dto.eventBody.details.tags).toEqual(['initial']);
+    expect(Object.isFrozen(dto.eventBody)).toBe(true);
+    expect(Object.isFrozen(dto.eventBody.details)).toBe(true);
+    expect(Object.isFrozen(dto.eventBody.details.tags)).toBe(true);
+  });
+
+  test('rejects circular eventBody input instead of producing a lossy DTO', () => {
+    const eventBody = {};
+    eventBody.self = eventBody;
+
+    expect(() => mapRawToIngestDTO({ eventBody }, 'inv_circular'))
+      .toThrow(/eventBody must not contain circular references/);
+  });
+
+  test('rejects values that JSON persistence would silently drop or corrupt', () => {
+    expect(() => mapRawToIngestDTO({ eventBody: { amount: 1n } }, 'inv_bigint'))
+      .toThrow(/cannot be persisted as JSON/);
+    expect(() => mapRawToIngestDTO({ eventBody: { amount: Infinity } }, 'inv_infinite'))
+      .toThrow(/non-finite number/);
+    expect(() => mapRawToIngestDTO({ eventBody: { callback: () => {} } }, 'inv_function'))
+      .toThrow(/cannot be persisted as JSON/);
+  });
+
+  test('rejects an invalid capturedAt without silently replacing it', () => {
+    expect(() => mapRawToIngestDTO({}, 'inv_bad_capture', { capturedAt: '' }))
+      .toThrow(/capturedAt must be a valid ISO-8601 timestamp/);
+    expect(() => mapRawToIngestDTO({}, 'inv_bad_capture', { capturedAt: 123 }))
+      .toThrow(TypeError);
+    expect(() => mapRawToIngestDTO({}, 'inv_bad_capture', { capturedAt: 'not-a-date' }))
+      .toThrow(/capturedAt must be a valid ISO-8601 timestamp/);
+    expect(() => mapRawToIngestDTO({}, 'inv_bad_capture', null))
+      .toThrow(/opts must be an object/);
+  });
+
+  test('rejects an invalid raw observedAt rather than replacing event data', () => {
+    expect(() => mapRawToIngestDTO(
+      { observedAt: 'not-a-date' },
+      'inv_bad_observed',
+      { capturedAt: '2026-05-01T08:00:00.000Z' },
+    )).toThrow(/raw\.observedAt must be a valid ISO-8601 timestamp/);
+  });
+
+  test('converts a Date observedAt to its stable ISO representation', () => {
+    const dto = mapRawToIngestDTO(
+      { observedAt: new Date('2026-05-01T08:00:00.000Z') },
+      'inv_date_observed',
+    );
+    expect(dto.observedAt).toBe('2026-05-01T08:00:00.000Z');
+  });
+
   test('observedAt is a valid ISO-8601 string', () => {
     const dto = mapRawToIngestDTO({}, 'inv_011');
     expect(() => new Date(dto.observedAt)).not.toThrow();
@@ -651,6 +706,20 @@ describe('mapIngestDTOToNormalized()', () => {
     expect(Object.isFrozen(normalized)).toBe(true);
   });
 
+  test('normalized DTO isolates and freezes nested eventBody data', () => {
+    const dto = makeIngestDTO({ eventBody: { details: { amount: '100' } } });
+    const normalized = mapIngestDTOToNormalized(dto);
+
+    dto.eventBody.details.amount = 'changed';
+    expect(normalized.eventBody.details.amount).toBe('100');
+    expect(Object.isFrozen(normalized.eventBody.details)).toBe(true);
+  });
+
+  test('normalized DTO rejects non-JSON eventBody values before persistence', () => {
+    expect(() => mapIngestDTOToNormalized(makeIngestDTO({ eventBody: 1n })))
+      .toThrow(/cannot be persisted as JSON/);
+  });
+
   test('concurrent consumers share same reference but cannot mutate it', () => {
     const dto = mapRawToIngestDTO(makeHorizonRecord(), 'inv_concurrent', {
       capturedAt: '2026-09-30T10:00:00.000Z',
@@ -663,8 +732,8 @@ describe('mapIngestDTOToNormalized()', () => {
     // Neither can be mutated
     expect(Object.isFrozen(n1)).toBe(true);
     expect(Object.isFrozen(n2)).toBe(true);
-    // Attempting mutation in strict mode throws; in non-strict it is silently ignored
-    expect(() => { n1.eventId = 'hacked'; }).not.toThrow();
+    // Frozen DTOs reject mutation in this strict-mode test module.
+    expect(() => { n1.eventId = 'hacked'; }).toThrow(TypeError);
     expect(n1.eventId).toBe(dto.eventId); // value unchanged
   });
 });
