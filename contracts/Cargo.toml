@@ -7,6 +7,7 @@ edition = "2021"
 crate-type = ["cdylib", "rlib"]
 
 [features]
+default = []
 testutils = ["soroban-sdk/testutils"]
 
 [dependencies]
@@ -14,9 +15,6 @@ soroban-sdk = { version = "21.0.0", features = ["alloc"] }
 
 [dev-dependencies]
 soroban-sdk = { version = "21.0.0", features = ["testutils"] }
-
-[features]
-default = []
 
 [profile.release]
 opt-level = "z"
