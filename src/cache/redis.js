@@ -447,8 +447,43 @@ class RedisEscrowSummaryCache {
     const key = this.key(invoiceId);
     const result = await this._execute(() => this.client.get(key));
 
-    if (!result.ok) {
-      return { hit: false, reason: result.reason };
+    try {
+      const raw = await this.circuitBreaker.execute(() =>
+        withTimeout(this.client.get(key), this.timeoutMs)
+      );
+
+      // Circuit breaker fallback returns null — treat as fail-open miss.
+      if (raw === null) {
+        return { hit: false, reason: 'miss' };
+      }
+
+      const entry = JSON.parse(raw);
+      if (
+        entry === null ||
+        typeof entry !== 'object' ||
+        !Object.prototype.hasOwnProperty.call(entry, 'summary')
+      ) {
+        throw new Error('Invalid Redis escrow summary entry');
+      }
+      if (
+        Number.isFinite(currentLedger) &&
+        Number.isFinite(entry.cachedLedger) &&
+        Math.abs(currentLedger - entry.cachedLedger) > this.ledgerGapThreshold
+      ) {
+        // Best-effort eviction — failures here are non-critical.
+        try {
+          await withTimeout(this.client.del(key), this.timeoutMs);
+        } catch {
+          // Ignore eviction errors; the TTL will handle cleanup.
+        }
+        return { hit: false, reason: 'ledger_gap' };
+      }
+
+      return { hit: true, value: entry.summary };
+    } catch {
+      // Redis error, timeout, or circuit breaker exception — fail open.
+      redisCacheFailOpenTotal.inc();
+      return { hit: false, reason: 'fail_open' };
     }
 
     const raw = result.value;
@@ -511,47 +546,19 @@ class RedisEscrowSummaryCache {
    * @returns {Promise<boolean>} True if the summary was successfully cached.
    */
   async setSummary(invoiceId, summary, currentLedger) {
-    if (!this.client) {
-      return false;
-    }
-    if (!isValidInvoiceId(invoiceId)) {
-      return false;
-    }
-    if (!isValidSummary(summary)) {
-      return false;
-    }
-    if (!isCacheableSummary(summary)) {
+    if (!this.client || !isValidInvoiceId(invoiceId) || summary === undefined) {
       return false;
     }
 
     const key = this.key(invoiceId);
-    const ledger = Number.isFinite(currentLedger) ? currentLedger : null;
-    const payload = JSON.stringify({
-      summary,
-      cachedLedger: ledger,
-      cachedAt: new Date().toISOString(),
-    });
-
-    const result = await this._execute(() =>
-      this.client.set(key, payload, 'EX', this.ttlSeconds)
-    );
-
-    return result.ok;
-  }
-
-  /**
-   * Performs the guarded write using a monotonic ledger compare-and-set.
-   * Falls back to a plain SET when the client lacks `eval` support.
-   * @param {string} key Redis key.
-   * @param {string} payload Serialized entry.
-   * @param {number|null} ledger Ledger sequence or null.
-   * @returns {Promise<string|null|>number>} Write result.
-   */
-  async _writeGuarded(key, payload, ledger) {
-    if (typeof this.client.eval !== 'function') {
-      return withTimeout(
-        this.client.set(key, payload, 'EX', this.ttlSeconds),
-        this.timeoutMs
+    try {
+      const payload = JSON.stringify({
+        summary,
+        cachedLedger: Number.isFinite(currentLedger) ? currentLedger : null,
+        cachedAt: new Date().toISOString(),
+      });
+      const result = await this.circuitBreaker.execute(() =>
+        withTimeout(this.client.set(key, payload, 'EX', this.ttlSeconds), this.timeoutMs)
       );
     }
 

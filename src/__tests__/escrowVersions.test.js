@@ -17,6 +17,18 @@ jest.mock('../middleware/apiKeyAuth', () => ({
   timingSafeStringEqual: (a, b) => a === b,
 }));
 
+const originalRpcUrl = process.env.SOROBAN_RPC_URL;
+beforeEach(() => {
+  process.env.SOROBAN_RPC_URL = 'http://localhost:8000';
+});
+afterAll(() => {
+  if (originalRpcUrl === undefined) {
+    delete process.env.SOROBAN_RPC_URL;
+  } else {
+    process.env.SOROBAN_RPC_URL = originalRpcUrl;
+  }
+});
+
 const { callSorobanContract } = require('../services/soroban');
 
 // Load escrowVersions defensively so a broken/partial module does not abort

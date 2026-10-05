@@ -93,192 +93,82 @@ function httpStatusToCode(status) {
   return `HTTP_${status}`;
 }
 
-/**
- * Return true when value is a finite integer within the HTTP status range.
- *
- * @param {unknown} value Candidate status value.
- * @returns {boolean}
- */
-function isValidStatus(value) {
-  return (
-    typeof value === "number" &&
-    Number.isInteger(value) &&
-    value >= MIN_STATUS &&
-    value <= MAX_STATUS
-  );
-}
+const INTERNAL_ERROR_MESSAGE = "An internal server error occurred.";
+const DEFAULT_RETRY_HINT =
+  "Do not retry until the issue is resolved or support is contacted.";
 
 /**
- * Normalize a potentially untrusted status value into a valid HTTP status.
+ * Normalize an AppError-like value into the stable error contract.
  *
- * Accepts integers and numeric strings (e.g. "404"). Anything else,
- * including non-integer numbers, out-of-range values, and non-numeric
- * strings, falls back to 500.
+ * This function is the single source of truth for the public shape of
+ * mapped AppErrors. It is deliberately defensive against malformed or
+ * partially constructed error objects so that callers always receive a
+ * consistent {status, code, message, retryable, retryHint} tuple.
  *
- * @param {unknown} value Candidate status value.
- * @returns {number} A guaranteed-valid HTTP status code.
+ * @param {object} error AppError-like value.
+ * @returns {{status: number, code: string, message: string, retryable: boolean, retryHint: string}}
  */
-function normalizeStatus(value) {
-  if (isValidStatus(value)) {
-    return value;
-  }
-  if (typeof value === "string" && /^[0-9]+$/.test(value.trim())) {
-    const parsed = Number(value.trim());
-    if (isValidStatus(parsed)) {
-      return parsed;
-    }
-  }
-  return FALLBACK_STATUS;
-}
+function mapAppError(error) {
+  const rawStatus = error.status;
+  const status =
+    typeof rawStatus === "number" && Number.isFinite(rawStatus)
+      ? rawStatus
+      : 500;
 
-/**
- * Return a trimmed, bounded string or the supplied fallback.
- *
- * @param {unknown} value Candidate value.
- * @param {number} maxLength Maximum accepted length.
- * @param {string} fallback Value used when input is not a non-empty string.
- * @returns {string}
- */
-function normalizeString(value, maxLength, fallback) {
-  if (typeof value !== "string") {
-    return fallback;
-  }
-  const trimmed = value.trim();
-  if (trimmed.length === 0) {
-    return fallback;
-  }
-  return trimmed.length > maxLength ? trimmed.slice(0, maxLength) : trimmed;
-}
+  const rawCode = error.code;
+  const code =
+    typeof rawCode === "string" && rawCode.length > 0
+      ? rawCode
+      : httpStatusToCode(status);
 
-/**
- * Normalize an error code into a bounded uppercase label.
- *
- * @param {unknown} value Candidate code.
- * @param {string} fallback Code used when input is not a usable string.
- * @returns {string}
- */
-function normalizeCode(value, fallback) {
-  const normalized = normalizeString(value, MAX_CODE_LENGTH, "");
-  if (normalized === "") {
-    return fallback;
-  }
-  return normalized.toUpperCase();
-}
+  // Prefer the explicit detail when present, otherwise fall back to the
+  // canonical message. Never emit a non-string message to keep the contract
+  // stable for downstream consumers.
+  const rawMessage = error.detail ?? error.message;
+  const message =
+    typeof rawMessage === "string" && rawMessage.length > 0
+      ? rawMessage
+      : httpStatusToCode(status);
 
-/**
- * Return true when the value is a boolean.
- *
- * @param {unknown} value Candidate value.
- * @returns {boolean}
- */
-function isBoolean(value) {
-  return typeof value === "boolean";
-}
+  const retryable = error.retryable === true;
+  const rawRetryHint = error.retryHint;
+  const retryHint = typeof rawRetryHint === "string" ? rawRetryHint : "";
 
-/**
- * Normalize the retryable flag. Only explicit booleans are hosped;
- * everything else falls back to the default derived from the status.
- *
- * @param {unknown} value Candidate flag.
- * @param {boolean} fallback Default value.
- * @returns {boolean}
- */
-function normalizeRetryable(value, fallback) {
-  return isBoolean(value) ? value : fallback;
-}
-
-/**
- * Derive the default retry hint for a status code.
- *
- * @param {number} status Valid HTTP status.
- * @returns {string}
- */
-function defaultRetryHint(status) {
-  if (status === 429) {
-    return "Wait for the rate limit window to reset before retrying.";
-  }
-  if (status === 503) {
-    return "Retry the request in a few moments.";
-  }
-  return "Do not retry until the issue is resolved or support is contacted.";
-}
-
-/**
- * Return true when the value is a non-null object (not an array).
- *
- * @param {unknown} value Candidate value.
- * @returns {boolean}
- */
-function isPlainObject(value) {
-  return (
-    value !== null &&
-    typeof value === "object" &&
-    !Array.isArray(value)
-  );
-}
-
-/**
- * Determine whether a thrown value is an AppError-like instance.
- *
- * @param {unknown} error Thrown value.
- * @returns {boolean}
- */
-function isAppErrorLike(error) {
-  return Boolean(
-    error &&
-      (error instanceof AppError || error.name === "AppError"),
-  );
+  return { status, code, message, retryable, retryHint };
 }
 
 /**
  * Map framework and application errors into a stable HTTP error contract.
  *
- * Validation boundaries:
- * - `status` is always a valid HTTP status integer in [100, 599]. Invalid or
- *   out-of-range values fall back to 500.
- * - `code` is always a non-empty uppercase string, bounded in length.
- * - `message` and `retryHint` are always non-empty bounded strings.
- * - `retryable` is always a boolean.
- * - Non-object thrown values (`null`, `undefined`, strings, numbers)
- *   produce a deterministic 500 response without leaking the value.
+ * Invariants:
+* - Always returns a new object with the exact keys {status, code, message,
+ *   retryable, retryHint}.
+ * - `status` is always a finite number.
+ * - `code` and `message` are always non-empty strings.
+ * - `retryable` is always a boolean and `retryHint` is always a string.
+ * - No internal details (e.g. stack traces, upstream payloads) are leaked.
  *
  * @param {unknown} error Thrown error value.
  * @returns {{status: number, code: string, message: string, retryable: boolean, retryHint: string}}
  */
 function mapError(error) {
-  if (isAppErrorLike(error)) {
-    const status = normalizeStatus(error.status);
-    const code = normalizeCode(error.code, httpStatusToCode(status));
-    const message = normalizeString(
-      error.detail,
-      MAX_MESSAGE_LENGTH,
-      normalizeString(
-        error.message,
-        MAX_MESSAGE_LENGTH,
-        httpStatusToCode(status),
-      ),
-    );
-    const retryable = normalizeRetryable(
-      error.retryable,
-      RETRYABLE_STATUSES.includes(status),
-    );
-    const retryHint = normalizeString(
-      error.retryHint,
-      MAX_RETRY_HINT_LENGTH,
-      defaultRetryHint(status),
-    );
-    return { status, code, message, retryable, retryHint };
+  if (error && (error instanceof AppError || error.name === "AppError")) {
+    return mapAppError(error);
   }
 
-  if (isPlainObject(error) && error.isCorsOriginRejected === true) {
+  if (
+    error &&
+    typeof error === "object" &&
+    error.isCorsOriginRejected === true
+  ) {
+    const message =
+      typeof error.message === "string" && error.message.length > 0
+        ? error.message
+        : "CORS policy: origin is not allowed.";
     return {
       status: 403,
       code: "FORBIDDEN",
-      message: normalizeString(
-        error.message,
-        MAX_MESSAGE_LENGTH,
-        "CORS policy: origin is not allowed.",
-      ),
+      message,
       retryable: false,
       retryHint: "",
     };
@@ -287,7 +177,7 @@ function mapError(error) {
   const isAppError =
     (error instanceof AppError) || name === 'AppError';
 
-  if (isPlainObject(error) && error.code === "ECONNCERFUSED") {
+  if (error && typeof error === "object" && error.code === "ECONNREFUSED") {
     return {
       status: 503,
       code: "UPSTREAM_ERROR",
@@ -297,7 +187,7 @@ function mapError(error) {
     };
   }
 
-  if (isPlainObject(error) && error.code === "CIRCUIT_OPEN") {
+  if (error && typeof error === "object" && error.code === "CIRCUIT_OPEN") {
     return {
       status: 503,
       code: "CIRCUIT_OPEN",
@@ -308,16 +198,26 @@ function mapError(error) {
     };
   }
 
-  const status = normalizeStatus(isPlainObject(error) ? error.status : undefined);
-  const retryable = RETIYABLE_STATUSES.includes(status);
+  const rawStatus = error && error.status;
+  const status =
+    typeof rawStatus === "number" && Number.isFinite(rawStatus)
+      ? rawStatus
+      : 500;
+  const retryableStatuses = [429, 503];
+  const retryable = retryableStatuses.includes(status);
+  let retryHint = "Do not retry until the issue is resolved or support is contacted.";
+  if (status === 429) {
+    retryHint = "Wait for the rate limit window to reset before retrying.";
+  } else if (status === 503) {
+    retryHint = "Retry the request in a few moments.";
+  }
+  const rawMessage = error && error.message;
   const message =
     status === 500
       ? "An internal server error occurred."
-      : normalizeString(
-          isPlainObject(error) ? error.message : undefined,
-          MAX_MESSAGE_LENGTH,
-          "An internal server error occurred.",
-        );
+      : typeof rawMessage === "string" && rawMessage.length > 0
+        ? rawMessage
+        : "An internal server error occurred.";
   return {
     isObject: true,
     isAppError,
@@ -491,5 +391,5 @@ function isBodyParserSyntaxError(error) {
 
 module.exports = {
   mapError,
-  isBodyParserSyntaxError,
+  isBodyParserSyntayError,
 };

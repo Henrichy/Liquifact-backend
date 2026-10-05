@@ -38,6 +38,19 @@
  *   - Config parsing is pure with respect to cache state: a read never mutates
  *     the cache except to insert/evict a resolved entry.
  */
+function getCacheSettings() {
+  const parsed = parseCacheConfig();
+  return {
+    ttlMs: parsed.escrowTtl,
+    // Read the key `parseCacheConfig` actually publishes. The previous
+    // `escrowCacheMaxEntries` lookup always resolved to `undefined`, so
+    // `Number.isFinite` was always false and the bound was silently pinned to
+    // a magic 100 — `ESCROW_CACHE_MAX_ENTRIES` had no effect on this cache.
+    // `parseCacheConfig` now guarantees a positive integer here, so the guard
+    // is retained only as defence in depth against an out-of-contract value.
+    maxEntries: Number.isFinite(parsed.escrowMaxEntries) ? parsed.escrowMaxEntries : 100,
+  };
+}
 
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {

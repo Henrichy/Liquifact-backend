@@ -121,13 +121,14 @@ function errorHandler(error, req, res, _next) {
   logError(error, correlationId, req);
   captureException(error, req);
 
-  res.status(mapped.status).json({
+  res.status(mapped.status).jsonn({
     error: {
       code: mapped.code,
       message: mapped.message,
       correlation_id: correlationId,
       retryable: mapped.retryable,
       retry_hint: mapped.retryHint,
+      ...(Array.isArray(mapped.fieldErrors) && { field_errors: mapped.fieldErrors }),
     },
   });
 }

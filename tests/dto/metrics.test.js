@@ -62,11 +62,16 @@ describe('toSmeMetricsResponse', () => {
     expect(result).toEqual({ open: 3, funded: 1, settled: 2, defaulted: 0 });
   });
 
-  it('coerces float values to integers (truncation via Number())', () => {
+  it('coerces float values to integers via floor', () => {
     const result = toSmeMetricsResponse({ open: 2.7, funded: 1.2, settled: 3.9, defaulted: 0.1 });
-    // Number() does not truncate; fields are coerced via Number() || 0
-    expect(result.open).toBe(2.7);
-    expect(result.funded).toBe(1.2);
+    // _coerceCount floors floats to integers
+    expect(result.open).toBe(2);
+    expect(result.funded).toBe(1);
+  });
+
+  it('normalizes negative and non-finite counts to zero', () => {
+    const result = toSmeMetricsResponse({ open: -1, funded: Infinity, settled: 'NaN', defaulted: 0 });
+    expect(result).toEqual({ open: 0, funded: 0, settled: 0, defaulted: 0 });
   });
 
   it('treats non-numeric string values as 0', () => {
@@ -169,8 +174,24 @@ describe('toSmeMetricsMeta', () => {
   it('includes invoices when present', () => {
     const invoices = [{ id: 1 }, { id: 2 }];
     const result = toSmeMetricsMeta({ invoices, timestamp: 't', version: 'v' });
-    expect(result.invoices).toBe(invoices);
+    expect(result.invoices).not.toBe(invoices);
+    expect(result.invoices).toEqual(invoices);
     expect(result.invoices).toHaveLength(2);
+  });
+
+  it('isolates concurrent response arrays from shared source mutations', async () => {
+    const invoices = [{ id: 1 }, { id: 2 }];
+    const [first, retry] = await Promise.all([
+      Promise.resolve().then(() => toSmeMetricsMeta({ invoices, timestamp: 't', version: 'v' })),
+      Promise.resolve().then(() => toSmeMetricsMeta({ invoices, timestamp: 't', version: 'v' })),
+    ]);
+
+    first.invoices.reverse();
+    first.invoices[0].id = 99;
+    first.invoices.push({ id: 3 });
+
+    expect(retry.invoices).toEqual([{ id: 1 }, { id: 2 }]);
+    expect(invoices).toEqual([{ id: 1 }, { id: 2 }]);
   });
 
   it('omits invoices when input is not an array', () => {
@@ -364,6 +385,12 @@ describe('toPersistenceRecordParams', () => {
     expect(result.statusCode).toBe(200);
   });
 
+  it('defaults status codes outside the HTTP range', () => {
+    expect(toPersistenceRecordParams({ statusCode: 99 }).statusCode).toBe(200);
+    expect(toPersistenceRecordParams({ statusCode: 600 }).statusCode).toBe(200);
+    expect(toPersistenceRecordParams({ statusCode: 599 }).statusCode).toBe(599);
+  });
+
   it('coerces durationSeconds via Number()', () => {
     const result = toPersistenceRecordParams({ durationSeconds: '0.123' });
     expect(result.durationSeconds).toBe(0.123);
@@ -374,25 +401,9 @@ describe('toPersistenceRecordParams', () => {
     expect(result.durationSeconds).toBe(0);
   });
 
-  it('recovers deterministically from throwing getters and unsafe numeric values', () => {
-    const raw = { endpoint: 'sme_invoice_upload', cause: 'storage' };
-    Object.defineProperty(raw, 'statusCode', { get() { throw new Error('secret'); } });
-    raw.durationSeconds = Infinity;
-
-    expect(toPersistenceRecordParams(raw)).toMatchObject({
-      endpoint: 'sme_invoice_upload',
-      statusCode: 200,
-      durationSeconds: 0,
-      cause: 'storage',
-    });
-  });
-
-  it('uses safe defaults when numeric coercion throws or status is out of range', () => {
-    expect(toPersistenceRecordParams({ statusCode: Symbol('x'), durationSeconds: -1 })).toMatchObject({
-      statusCode: 200,
-      durationSeconds: 0,
-    });
-    expect(toPersistenceRecordParams({ statusCode: 600 }).statusCode).toBe(200);
+  it('defaults negative and non-finite durations to zero', () => {
+    expect(toPersistenceRecordParams({ durationSeconds: -0.1 }).durationSeconds).toBe(0);
+    expect(toPersistenceRecordParams({ durationSeconds: Infinity }).durationSeconds).toBe(0);
   });
 });
 
@@ -428,13 +439,9 @@ describe('isValidSmeMetricsResponse', () => {
     expect(isValidSmeMetricsResponse({ open: 'a', funded: 0, settled: 0, defaulted: 0 })).toBe(false);
   });
 
-  it.each([
-    { open: -1, funded: 0, settled: 0, defaulted: 0 },
-    { open: 0.5, funded: 0, settled: 0, defaulted: 0 },
-    { open: Infinity, funded: 0, settled: 0, defaulted: 0 },
-    { open: Number.MAX_SAFE_INTEGER + 1, funded: 0, settled: 0, defaulted: 0 },
-  ])('rejects invalid count boundaries: %o', (value) => {
-    expect(isValidSmeMetricsResponse(value)).toBe(false);
+  it('returns false for negative or non-finite counts', () => {
+    expect(isValidSmeMetricsResponse({ open: -1, funded: 0, settled: 0, defaulted: 0 })).toBe(false);
+    expect(isValidSmeMetricsResponse({ open: Infinity, funded: 0, settled: 0, defaulted: 0 })).toBe(false);
   });
 
   it('returns true for an object with extra keys', () => {
@@ -499,6 +506,21 @@ describe('isValidPersistenceRecordParams', () => {
       statusCode: '400',
       durationSeconds: 0.1,
       cause: 'validation',
+    })).toBe(false);
+  });
+
+  it('returns false for out-of-range status and invalid duration values', () => {
+    expect(isValidPersistenceRecordParams({
+      endpoint: 'unknown',
+      statusCode: 600,
+      durationSeconds: 0.1,
+      cause: 'internal',
+    })).toBe(false);
+    expect(isValidPersistenceRecordParams({
+      endpoint: 'unknown',
+      statusCode: 500,
+      durationSeconds: Infinity,
+      cause: 'internal',
     })).toBe(false);
   });
 

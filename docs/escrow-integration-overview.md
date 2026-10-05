@@ -88,7 +88,7 @@ avoid IEEE 754 drift in UI rendering.
 |---------|------|-------------|
 | HTTP entry | [`src/index.js`](../src/index.js), [`src/app.js`](../src/app.js) | `startServer`, `createApp`, `GET/POST /api/escrow` |
 | Invoice → address | [`src/config/escrowMap.js`](../src/config/escrowMap.js) | `resolveEscrowAddress`, `ESCROW_ADDR_BY_INVOICE` |
-| Stellar network | [`src/config/stellar.js`](../src/config/stellar.js), [`src/config/index.js`](../src/config/index.js) | `getStellarConfig`, Zod `validate()` |
+| Stellar network | [`src/config/stellar.js`](../src/config/stellar.js), [`src/config/index.js`](../src/config/index.js) | `validateStellarConfig`, `getStellarConfig`, Zod `validate()` |
 | Soroban wrapper | [`src/services/soroban.js`](../src/services/soroban.js) | `callSorobanContract` (retries) |
 | Read + legal hold | [`src/services/escrowRead.js`](../src/services/escrowRead.js) | `readEscrowState`, `fetchLegalHold` |
 | Batch read | [`src/services/escrowBatchRead.js`](../src/services/escrowBatchRead.js) | Uses `readEscrowState` with concurrency limits and per-invoice transient error retry |
@@ -296,7 +296,7 @@ Documented in [README](../README.md) and asserted in [`src/config/stellar.test.j
 | `MAINNET` | `https://soroban.stellar.org` | `Public Global Stellar Network ; September 2014` |
 | `FUTURENET` | `https://rpc-futurenet.stellar.org` | `Test SDF Future Network ; October 2022` |
 
-**Boot-time note:** [`src/config/stellar.js`](../src/config/stellar.js) currently exports `getStellarConfig()` reading Zod-validated [`src/config/index.js`](../src/config/index.js). Tests import `validateStellarConfig` from `./stellar` (network/RPC mismatch errors). Wire-up in `src/index.js` may lag README — treat **`stellar.test.js` + README** as the contract for fail-fast pairing.
+**Boot-time note:** [`src/config/stellar.js`](../src/config/stellar.js) exports both accessors over the same canonical matrix: `validateStellarConfig()` (strict env gate) and `getStellarConfig()` (request-time accessor over the Zod-validated [`src/config/index.js`](../src/config/index.js) store). Because `config/index` validates `SOROBAN_RPC_URL` and `NETWORK_PASSPHRASE` independently and never pairs them, `getStellarConfig()` re-checks the pairing and throws `STELLAR_PASSPHRASE_RPC_MISMATCH` if a canonical passphrase sits next to another network's canonical endpoint — the guard against signing on the wrong network. Every failure is a `StellarConfigError` with a stable `code` and redacted `details`, so misconfiguration is diagnosable from logs without leaking credentials. Invariants, error codes and the compatibility note are documented in [`docs/config.md`](./config.md#3-configstellarjs--stellar-network-config). Wire-up of the boot gate in `src/index.js` may lag README — treat **`stellar.test.js` + README** as the contract for fail-fast pairing.
 
 ### Escrow-related variables
 
@@ -389,6 +389,7 @@ Assume testnet configuration and a mapping entry in `ESCROW_ADDR_BY_INVOICE`.
 
 | Doc | Focus |
 |-----|--------|
+| [bounty-contract-compatibility.md](./bounty-contract-compatibility.md) | Existing bounty ABI, storage, lifecycle guards, and regression checks |
 | [escrow-indexing-strategy.md](./escrow-indexing-strategy.md) | Horizon poller vs Captive Core upgrade |
 | [escrow-deployment-model.md](./escrow-deployment-model.md) | Per-instance deployment, invariants, factory risks |
 | [ops-signing.md](./ops-signing.md) | Delegated vs custodial signing, KMS, funding API |

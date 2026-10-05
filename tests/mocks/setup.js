@@ -5,17 +5,33 @@ jest.mock('../../src/metrics', () => {
     val: 0,
   });
 
+  // Shared in-memory prom-client registry stub. Returned by getRegistry() so
+  // that job modules using _counter() / new Counter({ registers: [getRegistry()] })
+  // can resolve counters without hitting the real prom-client registry (which
+  // is process-global and throws "already registered" across test suites).
+  const _registryStub = {
+    getSingleMetric: jest.fn().mockReturnValue(null),
+    registerMetric: jest.fn(),
+  };
+
   return {
+    // Registry accessor used by job helpers (_counter, etc.) — must be present
+    // so any job module that calls getRegistry() at load time does not throw.
+    getRegistry: jest.fn().mockReturnValue(_registryStub),
+
     footprintCacheHitsTotal: makeCounter(),
     footprintCacheMissesTotal: makeCounter(),
     footprintCacheEvictionsTotal: makeCounter(),
-
-    // CORS origin-cache metrics — required by src/config/corsCache.js which
-    // is loaded transitively whenever src/config/cors.js is imported.
+    // CORS origin-cache counters used by config/corsCache in CORS policy tests.
     corsCacheHitsTotal: makeCounter(),
     corsCacheMissesTotal: makeCounter(),
     corsCacheEvictionsTotal: makeCounter(),
     corsCacheInvalidationsTotal: makeCounter(),
+
+    // API-key registry cache counters (issue #1266) — so apiKeysCache.js can
+    // count hits/misses under test exactly as it does in production.
+    apiKeysCacheHitsTotal: makeCounter(),
+    apiKeysCacheMissesTotal: makeCounter(),
 
     // KYC webhook metrics — needed so route handlers can call
     // normalizeKycWebhookStatusClass / normalizeKycWebhookCause

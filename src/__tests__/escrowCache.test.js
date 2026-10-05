@@ -66,6 +66,28 @@ describe('Escrow Cache Integration', () => {
     expect(r2.value.invoiceId).toBe('inv_300');
   });
 
+  it('fails open when a summary cannot be serialized', async () => {
+    const client = new FakeRedisClient();
+    const cache = new RedisEscrowSummaryCache({ client });
+    const summary = {};
+    summary.self = summary;
+
+    await expect(cache.setSummary('inv_circular', summary)).resolves.toBe(false);
+    await expect(cache.setSummary('inv_missing', undefined)).resolves.toBe(false);
+    expect(client.map.size).toBe(0);
+  });
+
+  it('fails open for a cached entry without a summary field', async () => {
+    const client = new FakeRedisClient();
+    const cache = new RedisEscrowSummaryCache({ client });
+    client.map.set('escrow:summary:inv_malformed', JSON.stringify({ cachedLedger: 10 }));
+
+    await expect(cache.getSummary('inv_malformed')).resolves.toEqual({
+      hit: false,
+      reason: 'fail_open',
+    });
+  });
+
   it('simulated Redis timeout fails open and falls through', async () => {
     const slowClient = {
       get: () => new Promise((resolve) => setTimeout(() => resolve('data'), 5000)),
